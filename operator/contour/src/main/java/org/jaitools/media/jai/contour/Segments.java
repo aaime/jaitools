@@ -26,14 +26,13 @@
 package org.jaitools.media.jai.contour;
 
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
-import com.vividsolutions.jts.geom.Coordinate;
-import com.vividsolutions.jts.geom.LineString;
-import com.vividsolutions.jts.operation.linemerge.LineMerger;
+import org.jaitools.media.jai.contour.Segment.MergePoint;
 
-import org.jaitools.jts.Utils;
+import com.vividsolutions.jts.geom.LineString;
 
 
 /**
@@ -47,8 +46,22 @@ import org.jaitools.jts.Utils;
 class Segments {
     static final int MAX_SIZE = 16348; // this amounts to 130KB storage
     boolean simplify;
-    double[] ordinates;
-    int idx = 0;
+
+    Segment temp = new Segment();
+
+    /**
+     * List of segments sorted by start element
+     */
+    List<Segment> startList = new ArrayList<Segment>();
+
+    /**
+     * List of segments sorted by end element
+     */
+    List<Segment> endList = new ArrayList<Segment>();
+
+    /**
+     * The completed segment list
+     */
     List<LineString> result = new ArrayList<LineString>();
     
     public Segments(boolean simplify) {
@@ -63,70 +76,218 @@ class Segments {
      * @param y2
      */
     public void add(double x1, double y1, double x2, double y2) {
-        if(ordinates == null) {
-            ordinates = new double[512];
-        } else if((idx + 4) > ordinates.length) {
-            // reallocate
-            double[] temp = new double[ordinates.length * 2];
-            System.arraycopy(ordinates, 0, temp, 0, ordinates.length);
-            ordinates = temp;
+        // we don't add single points, only full segments
+        if (Segment.samePoint(x1, y1, x2, y2)) {
+            return;
         }
-        ordinates[idx++] = x1;
-        ordinates[idx++] = y1;
-        ordinates[idx++] = x2;
-        ordinates[idx++] = y2;
+
+        // keep the lower ordinate first, it's the one that can connect with
+        // previous segments
+        if (y2 < y1) {
+            double tmp = y1;
+            y1 = y2;
+            y2 = tmp;
+            tmp = x1;
+            x1 = x2;
+            x2 = tmp;
+        }
         
-        if(idx >= MAX_SIZE) {
-            merge();
+        // try to add using the lowest point first
+        if (appendSegment(x1, y1, x2, y2)) {
+            return;
         }
+        // in case of same elevation lines, we might want to try the other end
+        if (Segment.sameOrdinate(y2, y1) && appendSegment(x2, y2, x1, y1)) {
+            return;
+        }
+
+        // no connection, need to create a new segment
+        Segment segment = new Segment(x1, y1, x2, y2, simplify);
+        insertInStartList(segment);
+        insertInEndList(segment);
+    }
+
+    private boolean appendSegment(double x1, double y1, double x2, double y2) {
+        temp.setXY(x1, y1, x1, y1);
+        int startSegment = search(startList, temp, Segment.START_COMPARATOR);
+        if (startSegment >= 0) {
+            Segment segment = startList.remove(startSegment);
+            segment.addBeforeStart(x2, y2);
+            insertInStartList(segment);
+            return true;
+        } else {
+            int endSegment = search(endList, temp, Segment.END_COMPARATOR);
+            if (endSegment >= 0) {
+                Segment segment = endList.remove(endSegment);
+                segment.addAfterEnd(x2, y2);
+                insertInEndList(segment);
+                return true;
+            }
+        }
+        temp.setXY(x2, y2, x2, y2);
+        startSegment = search(startList, temp, Segment.START_COMPARATOR);
+        if (startSegment >= 0) {
+            Segment segment = startList.remove(startSegment);
+            segment.addBeforeStart(x1, y1);
+            insertInStartList(segment);
+            return true;
+        } else {
+            int endSegment = search(endList, temp, Segment.END_COMPARATOR);
+            if (endSegment >= 0) {
+                Segment segment = endList.remove(endSegment);
+                segment.addAfterEnd(x1, y1);
+                insertInEndList(segment);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void insertInEndList(Segment segment) {
+        if (endList.isEmpty()) {
+            endList.add(segment);
+            return;
+        }
+        int insertAt = search(endList, segment, Segment.END_COMPARATOR);
+        if (insertAt < 0) {
+            insertAt = -insertAt - 1;
+        }
+        endList.add(insertAt, segment);
+    }
+
+    private void insertInStartList(Segment segment) {
+        if (startList.isEmpty()) {
+            startList.add(segment);
+            return;
+        }
+        int insertAt = search(startList, segment, Segment.START_COMPARATOR);
+        if (insertAt < 0) {
+            insertAt = -insertAt - 1;
+        }
+        startList.add(insertAt, segment);
+    }
+
+    boolean sorted(List<Segment> list, Comparator<Segment> comparator) {
+        Segment prev = null;
+        for (Segment elem : list) {
+            if (prev != null && comparator.compare(prev, elem) > 0) {
+                return false;
+            }
+            prev = elem;
+        }
+        return true;
     }
     
     /**
-     * Returns the merged and eventually simplified segments
-     * @return
+     * Informs the segments a new scanline is started
      */
-    public List<LineString> getMergedSegments() {
-        if(idx > 0) {
-            merge();
-            // release the part of the storage we don't need anymore
-            ordinates = null;
+    public void lineComplete(int line) {
+        // look for all the segments that have not been touched during the last scan
+        for (int i = 0; i < startList.size();) {
+            Segment segment = startList.get(i);
+            // if touched, we can continue using it
+            if (segment.touched) {
+                segment.touched = false;
+                i++;
+                continue;
+            }
+            
+            // if not, remove it from the search lists
+            startList.remove(segment);
+            endList.remove(segment);
+
+            // can we merge it with an existing one?
+            temp.setXY(segment.xStart, segment.yStart, segment.xStart, segment.yStart);
+            Segment mergeTarget = null;
+            MergePoint mergePoint = null;
+
+            // end-start is the most efficient merge we can make, try it first
+            int endSegment = search(endList, temp, Segment.END_COMPARATOR);
+            if (endSegment >= 0) {
+                mergeTarget = endList.get(endSegment);
+                mergePoint = MergePoint.END_START;
+            } else {
+                int startSegment = search(startList, temp, Segment.START_COMPARATOR);
+                if (startSegment >= 0) {
+                    mergeTarget = startList.get(startSegment);
+                    mergePoint = MergePoint.START_START;
+                } else {
+                    temp.setXY(segment.xEnd, segment.yEnd, segment.xEnd, segment.yEnd);
+                    startSegment = search(startList, temp,
+                            Segment.START_COMPARATOR);
+                    if (startSegment >= 0) {
+                        mergeTarget = startList.get(startSegment);
+                        mergePoint = MergePoint.START_END;
+                    } else {
+                        endSegment = search(endList, temp,
+                                Segment.END_COMPARATOR);
+                        if (endSegment >= 0) {
+                            mergeTarget = endList.get(endSegment);
+                            mergePoint = MergePoint.END_END;
+                        }
+                    }
+                }
+            }
+
+            if (mergeTarget != null) {
+                mergeTarget.merge(segment, mergePoint);
+                startList.remove(mergeTarget);
+                insertInStartList(mergeTarget);
+                endList.remove(mergeTarget);
+                insertInEndList(mergeTarget);
+            } else {
+                LineString ls = segment.toLineString();
+                result.add(ls);
+            }
         }
-        return result;
+    }
+
+    int search(List<Segment> list, Segment reference, Comparator<Segment> comparator) {
+        if (list.size() > 64) {
+            return Collections.binarySearch(list, reference, comparator);
+        } else {
+            return linearSearch(list, reference, comparator);
+        }
+    }
+
+    private int linearSearch(List<Segment> list, Segment reference,
+            Comparator<Segment> comparator) {
+        int i = 0;
+        for (Segment segment : list) {
+            int compare = comparator.compare(segment, reference);
+            if (compare == 0) {
+                return i;
+            } else if (compare > 0) {
+                return -i - 1;
+            } else {
+                i++;
+            }
+        }
+        return (-i - 1);
     }
 
     /**
-     * Merges and eventually simplifies all of the segments collected so far with the 
-     * linestring collected so far
+     * Returns the merged and eventually simplified segments
+     * 
+     * @return
      */
-    void merge() {
-        // merge all the segments
-        LineMerger merger = new LineMerger();
-        for (int i = 0; i < idx;) {
-            Coordinate p1 = new Coordinate(ordinates[i++], ordinates[i++]);
-            Coordinate p2 = new Coordinate(ordinates[i++], ordinates[i++]);
-            if(!p1.equals2D(p2)) {
-                merger.add(Utils.getGeometryFactory().createLineString(new Coordinate[] {p1, p2}));
-            }
-        }
-        // reset the counter, we offloaded all segments
-        idx = 0;
-        // add to the mix all lines that have not been merged so far
-        // (we know linear rings are already complete so we skip them)
-        for (LineString ls : result) {
-            merger.add(ls);
-        }
-        // eventually simplify and add back the merged line strings
-        Collection<LineString> mergedLines = merger.getMergedLineStrings();
-        result.clear();
-        if(simplify) {
-            for (LineString merged : mergedLines) {
-                if(simplify) {
-                    merged = Utils.removeCollinearVertices(merged);
-                }
-                result.add(merged);
-            }
-        } else {
-            result.addAll(mergedLines);
-        }
+    public List<LineString> getMergedSegments() {
+        return result;
     }
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder("Segments(").append(startList.size()).append(",")
+                .append(result.size()).append(") ");
+        sb.append("active=");
+        for (Segment segment : startList) {
+            sb.append(segment).append("\n");
+        }
+        sb.append("complete=");
+        for (LineString ls : result) {
+            sb.append(ls).append("\n");
+        }
+        return sb.toString();
+    }
+
 }
