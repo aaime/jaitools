@@ -25,7 +25,6 @@
 
 package org.jaitools.imageutils;
 
-import org.jaitools.imageutils.shape.LiteShape;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
@@ -33,11 +32,15 @@ import java.awt.Shape;
 import java.awt.geom.AffineTransform;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
+import java.awt.image.DataBufferByte;
+import java.awt.image.Raster;
 import java.awt.image.renderable.ParameterBlock;
 import java.awt.image.renderable.RenderedImageFactory;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.media.jai.Interpolation;
@@ -47,6 +50,7 @@ import javax.media.jai.PlanarImage;
 import javax.media.jai.ROI;
 import javax.media.jai.ROIShape;
 
+import org.jaitools.imageutils.shape.LiteShape;
 import org.jaitools.jts.CoordinateSequence2D;
 
 import com.vividsolutions.jts.awt.ShapeReader;
@@ -58,6 +62,7 @@ import com.vividsolutions.jts.geom.GeometryFactory;
 import com.vividsolutions.jts.geom.MultiPolygon;
 import com.vividsolutions.jts.geom.Polygon;
 import com.vividsolutions.jts.geom.PrecisionModel;
+import com.vividsolutions.jts.geom.TopologyException;
 import com.vividsolutions.jts.geom.prep.PreparedGeometry;
 import com.vividsolutions.jts.geom.prep.PreparedGeometryFactory;
 import com.vividsolutions.jts.geom.util.AffineTransformation;
@@ -289,17 +294,22 @@ public class ROIGeometry extends ROI {
      * 
      * @param roi the ROI to add
      * @return the union as a new instance
-     * @throws UnsupportedOperationException if {@code roi} is not an instance
-     *         of ROIGeometry or {@link ROIShape}
      */
     @Override
     public ROI add(ROI roi) {
-        final Geometry geom = getGeometry(roi);
-        if (geom != null) {
-            Geometry union = geom.union(theGeom.getGeometry());
-            return buildROIGeometry(union);
+        try {
+            final Geometry geom = getGeometry(roi);
+            if (geom != null) {
+                Geometry union = geom.union(theGeom.getGeometry());
+                return buildROIGeometry(union);
+            }
+        } catch(TopologyException e) {
+            if(LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.log(Level.FINE, "Failed to perform operation using geometries, falling back on raster path", e);
+            }
         }
-        throw new UnsupportedOperationException(UNSUPPORTED_ROI_TYPE);
+        // fallback on robust path
+        return super.add(roi);
     }
 
     /**
@@ -423,25 +433,30 @@ public class ROIGeometry extends ROI {
      * 
      * @param roi the ROI to add
      * @return the union as a new instance
-     * @throws UnsupportedOperationException if {@code roi} is not an instance
-     *         of ROIGeometry or {@link ROIShape}
      */
     @Override
     public ROI exclusiveOr(ROI roi) {
-        final Geometry geom = getGeometry(roi);
-        if (geom != null) {
-            return buildROIGeometry(theGeom.getGeometry().symDifference(geom));
+        try {
+            final Geometry geom = getGeometry(roi);
+            if (geom != null) {
+                return buildROIGeometry(theGeom.getGeometry().symDifference(geom));
+            }
+        } catch(TopologyException e) {
+            if(LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.log(Level.FINE, "Failed to perform operation using geometries, falling back on raster path", e);
+            }
         }
-        throw new UnsupportedOperationException(UNSUPPORTED_ROI_TYPE);
+        // fallback on robust path
+        return super.exclusiveOr(roi);
+
     }
 
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
     @Override
     public int[][] getAsBitmask(int x, int y, int width, int height, int[][] mask) {
-        throw new UnsupportedOperationException("Not implemented");
+        // go the cheap way, only TiledImage seems to be using this method
+        ROI roiImage = new ROI(getAsImage());
+        return roiImage.getAsBitmask(x, y, width, height, mask);
+
     }
 
     /**
@@ -479,22 +494,29 @@ public class ROIGeometry extends ROI {
         return roiImage;
     }
 
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
     @Override
     public LinkedList getAsRectangleList(int x, int y, int width, int height) {
-        throw new UnsupportedOperationException("Not implemented");
-    }
-
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
-    @Override
-    protected LinkedList getAsRectangleList(int x, int y, int width, int height, boolean mergeRectangles) {
-        throw new UnsupportedOperationException("Not implemented");
+        Rectangle rect = new Rectangle(x, y, width, height);
+        if (!intersects(rect)) { 
+            // no overlap
+            return null;
+        } else if (theGeom.getGeometry().isRectangle()) {
+            // simple case, the geometry is a rectangle to start with
+            Envelope env = theGeom.getGeometry().getEnvelopeInternal();
+            Envelope intersection = env.intersection(new Envelope(x, x + width, y, y + width));
+            int rx = (int) Math.round(intersection.getMinX());
+            int ry = (int) Math.round(intersection.getMinY());
+            int rw = (int) Math.round(intersection.getMaxX() - rx);
+            int rh = (int) Math.round(intersection.getMaxY() - ry);
+            LinkedList result = new LinkedList();
+            result.add(new Rectangle(rx, ry, rw, rh));
+            return result;
+        } else {
+            // we cannot force the base class to use our image, but
+            // we can create a ROI around it
+            ROI roiImage = new ROI(getAsImage());
+            return roiImage.getAsRectangleList(x, y, width, height);
+        }
     }
 
     /**
@@ -538,13 +560,9 @@ public class ROIGeometry extends ROI {
         return new Rectangle2D.Double(env.getMinX(), env.getMinY(), env.getWidth(), env.getHeight());
     }
 
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
     @Override
     public int getThreshold() {
-        throw new UnsupportedOperationException("Not implemented");
+        return super.getThreshold();
     }
 
     /**
@@ -554,18 +572,22 @@ public class ROIGeometry extends ROI {
      * 
      * @param roi the ROI to intersect with
      * @return the intersection as a new instance
-     * @throws UnsupportedOperationException if {@code roi} is not an instance
-     *         of ROIGeometry or {@link ROIShape}
      */
     @Override
     public ROI intersect(ROI roi) {
-        final Geometry geom = getGeometry(roi);
-        if (geom != null) {
-            Geometry intersect = geom.intersection(theGeom.getGeometry());
-            return buildROIGeometry(intersect);
-
+        try {
+            final Geometry geom = getGeometry(roi);
+            if (geom != null) {
+                Geometry intersect = geom.intersection(theGeom.getGeometry());
+                return buildROIGeometry(intersect);
+            }
+        } catch(TopologyException e) {
+            if(LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.log(Level.FINE, "Failed to perform operation using geometries, falling back on raster path", e);
+            }
         }
-        throw new UnsupportedOperationException(UNSUPPORTED_ROI_TYPE);
+        // fallback on robust path
+        return super.intersect(roi);
     }
     
     /**
@@ -641,31 +663,19 @@ public class ROIGeometry extends ROI {
         return theGeom.intersects(testRect);
     }
 
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
     @Override
     public ROI performImageOp(RenderedImageFactory RIF, ParameterBlock paramBlock, int sourceIndex, RenderingHints renderHints) {
-        throw new UnsupportedOperationException("Not implemented");
+        return super.performImageOp(RIF, paramBlock, sourceIndex, renderHints);
     }
 
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
     @Override
     public ROI performImageOp(String name, ParameterBlock paramBlock, int sourceIndex, RenderingHints renderHints) {
-        throw new UnsupportedOperationException("Not implemented");
+        return super.performImageOp(name, paramBlock, sourceIndex, renderHints);
     }
 
-    /**
-     * This method is not supported.
-     * @throws UnsupportedOperationException if called
-     */
     @Override
     public void setThreshold(int threshold) {
-        throw new UnsupportedOperationException("Not implemented");
+        super.setThreshold(threshold);
     }
 
     /**
@@ -675,17 +685,22 @@ public class ROIGeometry extends ROI {
      * 
      * @param roi the ROI to add
      * @return the union as a new instance
-     * @throws UnsupportedOperationException if {@code roi} is not an instance
-     *         of ROIGeometry or {@link ROIShape}
      */
     @Override
     public ROI subtract(ROI roi) {
-        final Geometry geom = getGeometry(roi);
-        if (geom != null) {
-            Geometry difference = theGeom.getGeometry().difference(geom);
-            return buildROIGeometry(difference);
+        try {
+            final Geometry geom = getGeometry(roi);
+            if (geom != null) {
+                Geometry difference = theGeom.getGeometry().difference(geom);
+                return buildROIGeometry(difference);
+            }
+        } catch(TopologyException e) {
+            if(LOGGER.isLoggable(Level.FINE)) {
+                LOGGER.log(Level.FINE, "Failed to perform operation using geometries, falling back on raster path", e);
+            }
         }
-        throw new UnsupportedOperationException(UNSUPPORTED_ROI_TYPE);
+        // fallback on robust path
+        return super.subtract(roi);
     }
 
     /**

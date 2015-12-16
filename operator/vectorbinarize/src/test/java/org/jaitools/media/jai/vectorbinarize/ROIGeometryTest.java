@@ -25,19 +25,30 @@
 
 package org.jaitools.media.jai.vectorbinarize;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.Graphics2D;
 import java.awt.GraphicsEnvironment;
+import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.Shape;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.geom.GeneralPath;
 import java.awt.geom.PathIterator;
+import java.awt.image.BufferedImage;
 import java.awt.image.DataBuffer;
 import java.awt.image.Raster;
 import java.awt.image.RenderedImage;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedList;
 import java.util.List;
 
 import javax.media.jai.ImageLayout;
@@ -56,6 +67,9 @@ import javax.swing.SwingUtilities;
 import org.jaitools.imageutils.ROIGeometry;
 import org.jaitools.imageutils.shape.LiteShape;
 import org.jaitools.swing.SimpleImagePane;
+import org.junit.BeforeClass;
+import org.junit.Ignore;
+import org.junit.Test;
 
 import com.vividsolutions.jts.geom.Coordinate;
 import com.vividsolutions.jts.geom.Geometry;
@@ -64,12 +78,8 @@ import com.vividsolutions.jts.geom.MultiPolygon;
 import com.vividsolutions.jts.geom.Point;
 import com.vividsolutions.jts.geom.Polygon;
 import com.vividsolutions.jts.geom.util.AffineTransformation;
+import com.vividsolutions.jts.io.ParseException;
 import com.vividsolutions.jts.io.WKTReader;
-
-import org.junit.BeforeClass;
-import org.junit.Ignore;
-import org.junit.Test;
-import static org.junit.Assert.*;
 
 
 public class ROIGeometryTest {
@@ -214,11 +224,10 @@ public class ROIGeometryTest {
                 unionShape = unionShape.add(roiShapes[i]);
             }
         }
-        Shape shape = new LiteShape(((ROIGeometry) unionGeometry).getAsGeometry());
-
         if (INTERACTIVE) {
             printRoiShape((ROIShape) unionShape, "unionShape");
             System.out.println(((ROIGeometry) unionGeometry).getAsGeometry());
+            Shape shape = new LiteShape(((ROIGeometry) unionGeometry).getAsGeometry());
             printShape(shape, "unionGeometry");
         }
 
@@ -282,6 +291,37 @@ public class ROIGeometryTest {
     }
     
     @Test
+    public void intersectImageROI() throws ParseException {
+        ROI leftRight = createLeftRightROIImage();
+        ROIGeometry topBottom = createTopBottomROIGeometry();
+        
+        // intersect the image roi from the geom one
+        ROI result = topBottom.intersect(leftRight);
+        
+        // checks the quadrants
+        assertTrue(result.contains(64, 64));
+        assertFalse(result.contains(192, 64));
+        assertFalse(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+    }
+
+    @Test
+    public void intersectInvalidPolygon() throws ParseException, IOException {
+        ROI leftRight = createLeftRightROIGeometry();
+        ROIGeometry bowTie = createBowTieROIGeometry();
+        
+        // xor them, the invalid geometry should cause a topology exception and a fallback
+        // onto the more robust raster path
+        ROI result = bowTie.intersect(leftRight);
+        
+        // sample and check points 
+        assertTrue(result.contains(64, 64));
+        assertFalse(result.contains(192, 64));
+        assertFalse(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+    }
+    
+    @Test
     public void testSubtract() throws Exception {
         Point p1 = new GeometryFactory().createPoint(new Coordinate(10, 10)); 
         Point p2 = new GeometryFactory().createPoint(new Coordinate(20, 10));
@@ -297,6 +337,37 @@ public class ROIGeometryTest {
         ROI rsSubtract = rs1.subtract(rs2);
 
         assertROIEquivalent(rgSubtract, rsSubtract, "Subtract");
+    }
+    
+    @Test
+    public void subtractImageROI() throws ParseException {
+        ROI leftRight = createLeftRightROIImage();
+        ROIGeometry topBottom = createTopBottomROIGeometry();
+        
+        // subtract the image roi from the geom one
+        ROI result = topBottom.subtract(leftRight);
+        
+        // checks the quadrants
+        assertFalse(result.contains(64, 64));
+        assertTrue(result.contains(192, 64));
+        assertFalse(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+    }
+
+    @Test
+    public void subtractInvalidPolygon() throws ParseException, IOException {
+        ROI leftRight = createLeftRightROIGeometry();
+        ROIGeometry bowTie = createBowTieROIGeometry();
+        
+        // subtract them, the invalid geometry should cause a topology exception and a fallback
+        // onto the more robust raster path
+        ROI result = bowTie.subtract(leftRight);
+        
+        // sample and check points 
+        assertFalse(result.contains(64, 64));
+        assertTrue(result.contains(192, 64));
+        assertFalse(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
     }
     
     @Test
@@ -319,6 +390,42 @@ public class ROIGeometryTest {
 
             assertROIEquivalent(rgXor, rsXor, "Xor");
         }
+    }
+    
+    @Test
+    public void xorImageROI() throws ParseException {
+        ROI leftRight = createLeftRightROIImage();
+        ROIGeometry topBottom = createTopBottomROIGeometry();
+        
+        // xor the image roi from the geom one
+        ROI result = topBottom.exclusiveOr(leftRight);
+        
+        // checks the quadrants
+        assertFalse(result.contains(64, 64));
+        assertTrue(result.contains(192, 64));
+        assertTrue(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+    }
+
+    @Test
+    public void xorInvalidPolygon() throws ParseException, IOException {
+        ROI leftRight = createLeftRightROIGeometry();
+        ROIGeometry bowTie = createBowTieROIGeometry();
+        
+        // xor them, the invalid geometry should cause a topology exception and a fallback
+        // onto the more robust raster path
+        ROI result = bowTie.exclusiveOr(leftRight);
+        
+        // sample and check points 
+        assertFalse(result.contains(64, 64));
+        assertTrue(result.contains(192, 64));
+        assertTrue(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+        // the two "holes" inside the bowtie
+        assertTrue(result.contains(120, 32));
+        assertTrue(result.contains(120, 96));
+        assertFalse(result.contains(140, 32));
+        assertFalse(result.contains(140, 96));
     }
     
     @Test
@@ -421,6 +528,230 @@ public class ROIGeometryTest {
 
             assertROIEquivalent(roiGeometryUnion, roiShapeUnion, "Union");
         }
+    }
+    
+    @Test
+    public void unionImageROI() throws ParseException {
+        ROI leftRight = createLeftRightROIImage();
+        ROIGeometry topBottom = createTopBottomROIGeometry();
+        
+        // add them
+        ROI result = topBottom.add(leftRight);
+        
+        // checks the quadrants
+        assertTrue(result.contains(64, 64));
+        assertTrue(result.contains(192, 64));
+        assertTrue(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+    }
+
+    @Test
+    public void unionInvalidPolygon() throws ParseException, IOException {
+        ROI leftRight = createLeftRightROIGeometry();
+        ROIGeometry bowTie = createBowTieROIGeometry();
+        
+        // add them, the invalid geometry should cause a topology exception and a fallback
+        // onto the more robust raster path
+        ROI result = bowTie.add(leftRight);
+        
+        // sample and check points 
+        assertTrue(result.contains(64, 64));
+        assertTrue(result.contains(192, 64));
+        assertTrue(result.contains(64, 192));
+        assertFalse(result.contains(192, 192));
+        // in the holes left by the bowtie
+        assertFalse(result.contains(130, 32));
+        assertFalse(result.contains(130, 96));
+    }
+    
+    @Test
+    public void testRectangleListSimple() throws ParseException {
+        ROI leftRight = createLeftRightROIGeometry();
+        
+        // try with an area larger than the ROI
+        LinkedList rectangles = leftRight.getAsRectangleList(-50, -50, 500, 500);
+        assertSingleLeftRectangle(rectangles, 0, 0, 128, 256);
+        
+        // just as bit as the ROI
+        rectangles = leftRight.getAsRectangleList(0, 0, 256, 256);
+        assertSingleLeftRectangle(rectangles, 0, 0, 128, 256);
+        
+        // a subset, checks if intersection actually works
+        rectangles = leftRight.getAsRectangleList(64, 64, 64, 64);
+        assertSingleLeftRectangle(rectangles, 64, 64, 64, 64);
+        
+        // fully outside
+        rectangles = leftRight.getAsRectangleList(130, 0, 64, 64);
+        assertNull(rectangles);
+    }
+
+    private void assertSingleLeftRectangle(LinkedList rectangles, int x, int y, int w, int h) {
+        assertEquals(1, rectangles.size());
+        Rectangle r = (Rectangle) rectangles.getFirst();
+        assertRectangle(x, y, w, h, r);
+    }
+
+    private void assertRectangle(int x, int y, int w, int h, Rectangle r) {
+        assertEquals(x, r.x);
+        assertEquals(y, r.y);
+        assertEquals(w, r.width);
+        assertEquals(h, r.height);
+    }
+    
+    @Test
+    public void testRectangleListBowTie() throws ParseException {
+        ROI bowTie = createBowTieROIGeometry();
+        
+        // try with an area larger than the ROI
+        LinkedList rectangles = bowTie.getAsRectangleList(-50, -50, 500, 500);
+        assertEquals(254, rectangles.size());
+        int expectedWidth = 1;
+        
+        // the pattern is two rectangles on the opposite sides, with increasing width,
+        // until we reach the center, where rasterization generates two rectangles
+        // with a height of 2, but no touch in the central point)
+        int y = 0;
+        for (int i = 0; i < 254; i++) {
+            boolean even = (i % 2) == 0;
+            int x = even ? 0 : 256 - expectedWidth;
+            
+            Rectangle r = (Rectangle) rectangles.get(i);
+            assertEquals(x, r.x);
+            assertEquals(y, r.y);
+            assertEquals(expectedWidth, r.width);
+            
+            if(i == 126 || i == 127 ) {
+                assertEquals(2, r.height);
+            } else {
+                assertEquals(1, r.height);
+            }
+            
+            // if it's not a even rectangle, we're moving to the
+            // next row, update expected width and expected y
+            if(!even) {
+                if(i < 126) {
+                    expectedWidth += 2;
+                } else {
+                    expectedWidth -= 2;
+                }
+                
+                // in the middle we have the two rectangles side by side
+                // with a height of 2
+                if(i == 127) {
+                    y += 2;
+                } else {
+                    y++;
+                }
+            }
+        }
+    }
+    
+    @Test
+    public void testRectangleListSimpleReduction() throws IOException, ParseException {
+        // create a simple, but not rectangular, shape, that should result in only
+        // two rectangles
+        ROIGeometry leftRight = createLeftRightROIGeometry();
+        ROIGeometry topRight = createTopBottomROIGeometry();
+        ROI threeQuarters = leftRight.add(topRight);
+        
+        LinkedList rectangles = threeQuarters.getAsRectangleList(0, 0, 256, 256);
+        assertEquals(2, rectangles.size());
+        Rectangle r1 = (Rectangle) rectangles.get(0);
+        assertRectangle(0, 0, 256, 128, r1);
+        Rectangle r2 = (Rectangle) rectangles.get(1);
+        assertRectangle(0, 128, 128, 128, r2);
+    }
+    
+    @Test
+    public void testBitmaskSimple() throws ParseException {
+        ROI leftRight = createLeftRightROIGeometry();
+
+        // try an area fully outside
+        int[][] mask = leftRight.getAsBitmask(130, 0, 64, 64, null);
+        assertNull(mask);
+
+        
+        // try an area as big as the ROI
+        mask = leftRight.getAsBitmask(0, 0, 256, 256, null);
+        assertEquals(256, mask.length);
+        for (int i = 0; i < mask.length; i++) {
+            assertEquals(8, mask[i].length);
+            for (int j = 0; j < mask[i].length; j++) {
+                if(j < 4) {
+                    // all ones
+                    assertEquals(-1, mask[i][j]);
+                } else {
+                    // all zeroes
+                    assertEquals(0, mask[i][j]);
+                }
+            }
+        }
+        
+        // a subset of the ROI
+        mask = leftRight.getAsBitmask(64, 64, 128, 128, null);
+        assertEquals(128, mask.length);
+        for (int i = 0; i < mask.length; i++) {
+            assertEquals(4, mask[i].length);
+            for (int j = 0; j < mask[i].length; j++) {
+                if(j < 2) {
+                    // all ones
+                    assertEquals(-1, mask[i][j]);
+                } else {
+                    // all zeroes
+                    assertEquals(0, mask[i][j]);
+                }
+            }
+        }
+        
+    }
+    
+    /**
+     * Returns a ROI based on a binary image, 256x256, white in the left half, black in the right half
+     * @return
+     */
+    ROI createLeftRightROIImage() {
+        // half image ROI, left and right
+        BufferedImage bi = new BufferedImage(256, 256, BufferedImage.TYPE_BYTE_BINARY);
+        Graphics2D graphics = bi.createGraphics();
+        graphics.setColor(Color.WHITE);
+        graphics.fillRect(0, 0, 128, 256);
+        graphics.dispose();
+        ROI roiImage = new ROI(bi);
+        return roiImage;
+    }
+
+    /**
+     * Return "bow-tie" shaped polygon ROI, based on a self-intersecting, topologycally invalid polygon,
+     * occupying the top half of the 256x256 space
+     * @return
+     * @throws ParseException
+     */
+    ROIGeometry createBowTieROIGeometry() throws ParseException {
+        Polygon bowtie = (Polygon) new WKTReader().read("POLYGON ((0 0, 256 128, 256 0, 0 128, 0 0))");
+        ROIGeometry roiGeometry = new ROIGeometry(bowtie);
+        return roiGeometry;
+    }
+    
+    /**
+     * A ROIGeometry occupying the top half of the 256x256 area
+     * @return
+     * @throws ParseException
+     */
+    ROIGeometry createTopBottomROIGeometry() throws ParseException {
+        Polygon rectangle = (Polygon) new WKTReader().read("POLYGON ((0 0, 256 0, 256 128, 0 128, 0 0))");
+        ROIGeometry roiGeometry = new ROIGeometry(rectangle);
+        return roiGeometry;
+    }
+    
+    /**
+     * A ROIGeometry occupying the left side of the 256x256 area
+     * @return
+     * @throws ParseException
+     */
+    ROIGeometry createLeftRightROIGeometry() throws ParseException {
+        Polygon rectangle = (Polygon) new WKTReader().read("POLYGON ((0 0, 128 0, 128 256, 0 256, 0 0))");
+        ROIGeometry roiGeometry = new ROIGeometry(rectangle);
+        return roiGeometry;
     }
 
     /**
